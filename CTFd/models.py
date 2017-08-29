@@ -41,19 +41,6 @@ class Pages(db.Model):
         return "<Pages route {0}>".format(self.route)
 
 
-class Containers(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(80))
-    buildfile = db.Column(db.Text)
-
-    def __init__(self, name, buildfile):
-        self.name = name
-        self.buildfile = buildfile
-
-    def __repr__(self):
-        return "<Container ID:(0) {1}>".format(self.id, self.name)
-
-
 class Challenges(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(80))
@@ -63,13 +50,15 @@ class Challenges(db.Model):
     category = db.Column(db.String(80))
     type = db.Column(db.Integer)
     hidden = db.Column(db.Boolean)
+    first = db.Column(db.Boolean)
 
-    def __init__(self, name, description, value, category, type=0):
+    def __init__(self, name, description, value, category, type = 0, first=0):
         self.name = name
         self.description = description
         self.value = value
         self.category = category
         self.type = type
+        self.first = first
         # self.flags = json.dumps(flags)
 
     def __repr__(self):
@@ -178,7 +167,7 @@ class Teams(db.Model):
 
     def score(self, admin=False):
         score = db.func.sum(Challenges.value).label('score')
-        team = db.session.query(Solves.teamid, score).join(Teams).join(Challenges).filter(Teams.banned == False, Teams.id == self.id)
+        team = db.session.query(Solves.teamid, score).join(Teams).join(Challenges).filter(Teams.id == self.id)
         award_score = db.func.sum(Awards.value).label('award_score')
         award = db.session.query(award_score).filter_by(teamid=self.id)
 
@@ -193,8 +182,12 @@ class Teams(db.Model):
         team = team.group_by(Solves.teamid).first()
         award = award.first()
 
-        if team:
+        if team and award:
             return int(team.score or 0) + int(award.award_score or 0)
+        elif team:
+            return int(team.score or 0)
+        elif award:
+            return int(award.award_score or 0)
         else:
             return 0
 
