@@ -1,3 +1,4 @@
+import base64
 import datetime
 import functools
 import hashlib
@@ -12,11 +13,9 @@ import shutil
 import six
 import smtplib
 import socket
-import subprocess
 import sys
 import tempfile
 import time
-import urllib
 import dataset
 import zipfile
 import io
@@ -25,11 +24,11 @@ from email.mime.text import MIMEText
 from flask import current_app as app, request, redirect, url_for, session, render_template, abort
 from flask_caching import Cache
 from flask_migrate import Migrate, upgrade as migrate_upgrade, stamp as migrate_stamp
-from itsdangerous import Signer
-from six.moves.urllib.parse import urlparse, urljoin
+from itsdangerous import TimedSerializer, BadTimeSignature, Signer, BadSignature
+from six.moves.urllib.parse import urlparse, urljoin, quote, unquote
 from werkzeug.utils import secure_filename
 
-from CTFd.models import db, WrongKeys, Pages, Config, Tracking, Teams, Files, Containers, ip2long, long2ip
+from CTFd.models import db, WrongKeys, Pages, Config, Tracking, Teams, Files, ip2long, long2ip
 
 cache = Cache()
 migrate = Migrate()
@@ -105,7 +104,6 @@ def init_utils(app):
     app.jinja_env.globals.update(can_send_mail=can_send_mail)
     app.jinja_env.globals.update(ctf_name=ctf_name)
     app.jinja_env.globals.update(ctf_theme=ctf_theme)
-    app.jinja_env.globals.update(can_create_container=can_create_container)
     app.jinja_env.globals.update(get_configurable_plugins=get_configurable_plugins)
     app.jinja_env.globals.update(get_config=get_config)
     app.jinja_env.globals.update(hide_scores=hide_scores)
@@ -436,13 +434,17 @@ def mailserver():
     return False
 
 
-def get_smtp(host, port, username=None, password=None, TLS=None, SSL=None):
-    smtp = smtplib.SMTP(host, port)
-    smtp.ehlo()
+def get_smtp(host, port, username=None, password=None, TLS=None, SSL=None, auth=None):
+    if SSL is None:
+        smtp = smtplib.SMTP(host, port)
+    else:
+        smtp = smtplib.SMTP_SSL(host, port)
+
     if TLS:
         smtp.starttls()
-        smtp.ehlo()
-    smtp.login(username, password)
+
+    if auth:
+        smtp.login(username, password)
     return smtp
 
 
@@ -477,6 +479,8 @@ def sendmail(addr, text):
             data['TLS'] = get_config('mail_tls')
         if get_config('mail_ssl'):
             data['SSL'] = get_config('mail_ssl')
+        if get_config('mail_useauth'):
+            data['auth'] = get_config('mail_useauth')
 
         smtp = get_smtp(**data)
         msg = MIMEText(text)
@@ -492,11 +496,12 @@ def sendmail(addr, text):
 
 
 def verify_email(addr):
-    s = Signer(app.config['SECRET_KEY'])
-    token = s.sign(addr)
-    text = """Please click the following link to confirm your email address for {}: {}""".format(
-        get_config('ctf_name'),
-        url_for('auth.confirm_user', _external=True) + '/' + urllib.quote_plus(token.encode('base64'))
+    s = TimedSerializer(app.config['SECRET_KEY'])
+    token = s.dumps(addr)
+    text = """Please click the following link to confirm your email address for {ctf_name}: {url}/{token}""".format(
+        ctf_name=get_config('ctf_name'),
+        url=url_for('auth.confirm_user', _external=True),
+        token=base64encode(token, urlencode=True)
     )
     sendmail(addr, text)
 
@@ -519,134 +524,35 @@ def sha512(string):
     return hashlib.sha512(string).hexdigest()
 
 
-@cache.memoize()
-def can_create_container():
-    try:
-        subprocess.check_output(['docker', 'version'])
-        return True
-    except (subprocess.CalledProcessError, OSError):
-        return False
+def base64encode(s, urlencode=False):
+    if six.PY3 and isinstance(s, six.string_types):
+        s = s.encode('utf-8')
+    else:
+        # Python 2 support because the base64 module doesnt like unicode
+        s = str(s)
+
+    encoded = base64.urlsafe_b64encode(s)
+    if six.PY3:
+        encoded = encoded.decode('utf-8')
+    if urlencode:
+        encoded = quote(encoded)
+    return encoded
 
 
-def is_port_free(port):
-    s = socket.socket()
-    result = s.connect_ex(('127.0.0.1', port))
-    if result == 0:
-        s.close()
-        return False
-    return True
+def base64decode(s, urldecode=False):
+    if urldecode:
+        s = unquote(s)
 
+    if six.PY3 and isinstance(s, six.string_types):
+        s = s.encode('utf-8')
+    else:
+        # Python 2 support because the base64 module doesnt like unicode
+        s = str(s)
 
-def create_image(name, buildfile, files):
-    if not can_create_container():
-        return False
-    folder = tempfile.mkdtemp(prefix='ctfd')
-    tmpfile = tempfile.NamedTemporaryFile(dir=folder, delete=False)
-    tmpfile.write(buildfile)
-    tmpfile.close()
-
-    for f in files:
-        if f.filename.strip():
-            filename = os.path.basename(f.filename)
-            f.save(os.path.join(folder, filename))
-    # repository name component must match "[a-z0-9](?:-*[a-z0-9])*(?:[._][a-z0-9](?:-*[a-z0-9])*)*"
-    # docker build -f tmpfile.name -t name
-    try:
-        cmd = ['docker', 'build', '-f', tmpfile.name, '-t', name, folder]
-        print(cmd)
-        subprocess.call(cmd)
-        container = Containers(name, buildfile)
-        db.session.add(container)
-        db.session.commit()
-        db.session.close()
-        rmdir(folder)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def delete_image(name):
-    try:
-        subprocess.call(['docker', 'rm', name])
-        subprocess.call(['docker', 'rmi', name])
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def run_image(name):
-    try:
-        info = json.loads(subprocess.check_output(['docker', 'inspect', '--type=image', name]))
-
-        try:
-            ports_asked = info[0]['Config']['ExposedPorts'].keys()
-            ports_asked = [int(re.sub('[A-Za-z/]+', '', port)) for port in ports_asked]
-        except KeyError:
-            ports_asked = []
-
-        cmd = ['docker', 'run', '-d']
-        ports_used = []
-        for port in ports_asked:
-            if is_port_free(port):
-                cmd.append('-p')
-                cmd.append('{}:{}'.format(port, port))
-            else:
-                cmd.append('-p')
-                ports_used.append('{}'.format(port))
-        cmd += ['--name', name, name]
-        print(cmd)
-        subprocess.call(cmd)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def container_start(name):
-    try:
-        cmd = ['docker', 'start', name]
-        subprocess.call(cmd)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def container_stop(name):
-    try:
-        cmd = ['docker', 'stop', name]
-        subprocess.call(cmd)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-
-def container_status(name):
-    try:
-        data = json.loads(subprocess.check_output(['docker', 'inspect', '--type=container', name]))
-        status = data[0]["State"]["Status"]
-        return status
-    except subprocess.CalledProcessError:
-        return 'missing'
-
-
-def container_ports(name, verbose=False):
-    try:
-        info = json.loads(subprocess.check_output(['docker', 'inspect', '--type=container', name]))
-        if verbose:
-            ports = info[0]["NetworkSettings"]["Ports"]
-            if not ports:
-                return []
-            final = []
-            for port in ports.keys():
-                final.append("".join([ports[port][0]["HostPort"], '->', port]))
-            return final
-        else:
-            ports = info[0]['Config']['ExposedPorts'].keys()
-            if not ports:
-                return []
-            ports = [int(re.sub('[A-Za-z/]+', '', port)) for port in ports]
-            return ports
-    except subprocess.CalledProcessError:
-        return []
+    decoded = base64.urlsafe_b64decode(s)
+    if six.PY3:
+        decoded = decoded.decode('utf-8')
+    return decoded
 
 
 def export_ctf(segments=None):
@@ -676,7 +582,6 @@ def export_ctf(segments=None):
             'alembic_version',
             'config',
             'pages',
-            'containers',
         ]
     }
 
@@ -737,7 +642,6 @@ def import_ctf(backup, segments=None, erase=False):
             'alembic_version',
             'config',
             'pages',
-            'containers',
         ]
     }
 
@@ -772,19 +676,6 @@ def import_ctf(backup, segments=None, erase=False):
                         else:
                             page = Pages(route, html)
                             db.session.add(page)
-                        db.session.commit()
-
-                elif item == 'containers':
-                    saved = json.loads(data)
-                    for entry in saved['results']:
-                        name = entry['name']
-                        buildfile = entry['buildfile']
-                        container = Containers.query.filter_by(name=name).first()
-                        if container:
-                            container.buildfile = buildfile
-                        else:
-                            container = Containers(name, buildfile)
-                            db.session.add(container)
                         db.session.commit()
 
     for segment in segments:
