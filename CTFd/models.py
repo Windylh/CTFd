@@ -52,13 +52,13 @@ class Challenges(db.Model):
     hidden = db.Column(db.Boolean)
     first = db.Column(db.Boolean)
 
-    def __init__(self, name, description, value, category, type = 0, first=0):
+    def __init__(self, name, description, value, category, type=0, first=0):
         self.name = name
         self.description = description
         self.value = value
         self.category = category
         self.type = type
-        self.first = first
+        self.first = False
         # self.flags = json.dumps(flags)
 
     def __repr__(self):

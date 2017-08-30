@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from tests.helpers import *
 from CTFd.models import Teams, Solves, WrongKeys
-import json
+from CTFd.utils import get_config, set_config
 from CTFd import utils
+from tests.helpers import *
+from freezegun import freeze_time
+from mock import patch
+import json
 
 
 def test_index():
@@ -495,3 +498,168 @@ def test_ctfd_setup_redirect():
             r = client.get('/themes/original/static/css/style.css')
             assert r.status_code == 200
     destroy_ctfd(app)
+
+
+def test_user_cannot_unlock_hint():
+    """Test that a user can't unlock a hint if they don't have enough points"""
+    app = create_ctfd()
+    with app.app_context():
+        with app.test_client() as client:
+            register_user(app, name="user1", email="user1@ctfd.io")
+
+            chal = gen_challenge(app.db, value=100)
+            chal_id = chal.id
+
+            flag = gen_flag(app.db, chal=chal.id, flag='flag')
+
+            hint = gen_hint(db, chal_id, cost=10)
+            hint_id = hint.id
+
+            client = login_as_user(app, name="user1", password="password")
+
+            with client.session_transaction() as sess:
+                data = {
+                    "nonce": sess.get('nonce')
+                }
+                r = client.post('/hints/{}'.format(hint_id), data=data)
+                resp = json.loads(r.data.decode('utf8'))
+                assert resp.get('errors') == 'Not enough points'
+    destroy_ctfd(app)
+
+
+def test_user_can_unlock_hint():
+    """Test that a user can unlock a hint if they have enough points"""
+    app = create_ctfd()
+    with app.app_context():
+        with app.test_client() as client:
+            register_user(app, name="user1", email="user1@ctfd.io")
+
+            chal = gen_challenge(app.db, value=100)
+            chal_id = chal.id
+
+            flag = gen_flag(app.db, chal=chal.id, flag='flag')
+
+            hint = gen_hint(app.db, chal_id, cost=10)
+            hint_id = hint.id
+
+            award = gen_award(app.db, teamid=2, value=15)
+
+            client = login_as_user(app, name="user1", password="password")
+
+            with client.session_transaction() as sess:
+                data = {
+                    "nonce": sess.get('nonce')
+                }
+                r = client.post('/hints/{}'.format(hint_id), data=data)
+                resp = json.loads(r.data.decode('utf8'))
+                assert resp.get('errors') is None
+                assert resp.get('hint')
+                assert resp.get('chal') == chal_id
+    destroy_ctfd(app)
+
+
+@patch('smtplib.SMTP')
+@freeze_time("2012-01-14 03:21:34")
+def test_user_can_confirm_email(mock_smtp):
+    '''Test that a user is capable of confirming their email address'''
+    app = create_ctfd()
+    with app.app_context():
+        # Set CTFd to only allow confirmed users and send emails
+        set_config('verify_emails', True)
+        set_config('mail_server', 'localhost')
+        set_config('mail_port', 25)
+        set_config('mail_username', 'username')
+        set_config('mail_password', 'password')
+
+        register_user(app, name="user1", email="user@user.com")
+
+        # Teams are not verified by default
+        team = Teams.query.filter_by(email='user@user.com').first()
+        assert team.verified == False
+
+        client = login_as_user(app, name="user1", password="password")
+
+        # smtp.sendmail was called
+        mock_smtp.return_value.sendmail.assert_called()
+
+        with client.session_transaction() as sess:
+            data = {
+                "nonce": sess.get('nonce')
+            }
+            r = client.get('/challenges')
+            assert r.location == "http://localhost/confirm"  # We got redirected to /confirm
+
+            # Use precalculated confirmation secret
+            r = client.get('http://localhost/confirm/InVzZXJAdXNlci5jb20iLkFmS0dQZy5kLUJnVkgwaUhadzFHaXVENHczWTJCVVJwdWc%3D')
+            assert r.location == 'http://localhost/challenges'
+
+            # The team is now verified
+            team = Teams.query.filter_by(email='user@user.com').first()
+            assert team.verified == True
+
+
+@patch('smtplib.SMTP')
+@freeze_time("2012-01-14 03:21:34")
+def test_user_can_reset_password(mock_smtp):
+    '''Test that a user is capable of resetting their password'''
+    from email.mime.text import MIMEText
+    app = create_ctfd()
+    with app.app_context():
+        # Set CTFd to send emails
+        set_config('mail_server', 'localhost')
+        set_config('mail_port', 25)
+        set_config('mail_username', 'username')
+        set_config('mail_password', 'password')
+
+        # Create a user
+        register_user(app, name="user1", email="user@user.com")
+
+        with app.test_client() as client:
+            r = client.get('/reset_password')
+
+            # Build reset password data
+            with client.session_transaction() as sess:
+                data = {
+                    'nonce': sess.get('nonce'),
+                    'email': 'user@user.com'
+                }
+
+            # Issue the password reset request
+            r = client.post('/reset_password', data=data)
+
+            from_addr = get_config('mailfrom_addr') or app.config.get('MAILFROM_ADDR')
+            to_addr = 'user@user.com'
+
+            # Build the email
+            msg = """
+Did you initiate a password reset?
+
+http://localhost/reset_password/InVzZXIxIi5BZktHUGcuTVhkTmZtOWU2U2xwSXZ1MlFwTjdwa3F5V3hR
+
+"""
+            email_msg = MIMEText(msg)
+            email_msg['Subject'] = "Message from CTFd"
+            email_msg['From'] = from_addr
+            email_msg['To'] = to_addr
+
+            # Make sure that the reset password email is sent
+            mock_smtp.return_value.sendmail.assert_called_with(from_addr, [to_addr], email_msg.as_string())
+
+            # Get user's original password
+            team = Teams.query.filter_by(email="user@user.com").first()
+            team_password_saved = team.password
+
+            # Build the POST data
+            with client.session_transaction() as sess:
+                data = {
+                    'nonce': sess.get('nonce'),
+                    'password': 'passwordtwo'
+                }
+
+            # Do the password reset
+            r = client.get('/reset_password')
+            r = client.post('/reset_password/InVzZXIxIi5BZktHUGcuTVhkTmZtOWU2U2xwSXZ1MlFwTjdwa3F5V3hR', data=data)
+
+            # Make sure that the user's password changed
+            team = Teams.query.filter_by(email="user@user.com").first()
+            assert team.password != team_password_saved

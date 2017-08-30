@@ -19,8 +19,11 @@ CTFd is a Capture The Flag in a can. It's easy to customize with plugins and the
 ## Live Demo
 https://demo.ctfd.io/
 
-## Reverse Engineering Module
-https://reversing.ctfd.io/
+## Managed Hosting
+Looking to use CTFd but don't want to deal with managing infrastructure? Check out [the CTFd website](https://ctfd.io/) for managed CTFd deployments. 
+
+## HackerFire
+Looking for CTF challenges to work on? [HackerFire](https://hackerfire.com/) is a learning focused CTF built using CTFd. It features a wide variety of challenges and is updated with new content frequently. It also contains custom knowledge resources to teach newcomers about the techniques used to solve a challenge. 
 
 ## Credits
 * Logo by [Laura Barbera](http://www.laurabb.com/)

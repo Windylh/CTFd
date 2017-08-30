@@ -10,7 +10,7 @@ from sqlalchemy.sql import not_
 from sqlalchemy.exc import IntegrityError
 
 from CTFd.utils import admins_only, is_admin, cache, export_ctf, import_ctf
-from CTFd.models import db, Teams, Solves, Awards, Containers, Challenges, WrongKeys, Keys, Tags, Files, Tracking, Pages, Config, DatabaseError
+from CTFd.models import db, Teams, Solves, Awards, Challenges, WrongKeys, Keys, Tags, Files, Tracking, Pages, Config, DatabaseError
 from CTFd.scoreboard import get_standings
 from CTFd.plugins.keys import get_key_class, KEY_CLASSES
 
@@ -18,7 +18,6 @@ from CTFd.admin.statistics import admin_statistics
 from CTFd.admin.challenges import admin_challenges
 from CTFd.admin.scoreboard import admin_scoreboard
 from CTFd.admin.pages import admin_pages
-from CTFd.admin.containers import admin_containers
 from CTFd.admin.keys import admin_keys
 from CTFd.admin.teams import admin_teams
 
@@ -49,6 +48,8 @@ def admin_plugin_config(plugin):
             if k == "nonce":
                 continue
             utils.set_config(k, v)
+        with app.app_context():
+            cache.clear()
         return '1'
 
 
@@ -111,6 +112,7 @@ def admin_config():
             verify_emails = bool(request.form.get('verify_emails', None))
             mail_tls = bool(request.form.get('mail_tls', None))
             mail_ssl = bool(request.form.get('mail_ssl', None))
+            mail_useauth = bool(request.form.get('mail_useauth', None))
         except (ValueError, TypeError):
             view_challenges_unregistered = None
             view_scoreboard_if_authed = None
@@ -121,6 +123,7 @@ def admin_config():
             verify_emails = None
             mail_tls = None
             mail_ssl = None
+            mail_useauth = None
         finally:
             view_challenges_unregistered = utils.set_config('view_challenges_unregistered', view_challenges_unregistered)
             view_scoreboard_if_authed = utils.set_config('view_scoreboard_if_authed', view_scoreboard_if_authed)
@@ -131,6 +134,7 @@ def admin_config():
             verify_emails = utils.set_config('verify_emails', verify_emails)
             mail_tls = utils.set_config('mail_tls', mail_tls)
             mail_ssl = utils.set_config('mail_ssl', mail_ssl)
+            mail_useauth = utils.set_config('mail_useauth', mail_useauth)
 
         mail_server = utils.set_config("mail_server", request.form.get('mail_server', None))
         mail_port = utils.set_config("mail_port", request.form.get('mail_port', None))
@@ -184,6 +188,7 @@ def admin_config():
 
     mail_tls = utils.get_config('mail_tls')
     mail_ssl = utils.get_config('mail_ssl')
+    mail_useauth = utils.get_config('mail_useauth')
 
     view_challenges_unregistered = utils.get_config('view_challenges_unregistered')
     view_scoreboard_if_authed = utils.get_config('view_scoreboard_if_authed')
@@ -206,6 +211,7 @@ def admin_config():
                            hide_scores=hide_scores,
                            mail_server=mail_server,
                            mail_port=mail_port,
+                           mail_useauth=mail_useauth,
                            mail_username=mail_username,
                            mail_password=mail_password,
                            mail_tls=mail_tls,
