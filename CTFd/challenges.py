@@ -297,8 +297,8 @@ def chal(chalid):
                     else:
                         award = Awards(teamid=session['id'], name='First blood for {}'.format(chal.name), value=(50))
                         challenge.first = True
+                        db.session.add(award)
                     db.session.add(solve)
-                    db.session.add(award)
                     db.session.commit()
                     db.session.close()
                 logger.info("[{0}] {1} submitted {2} with kpm {3} [CORRECT]".format(*data))
