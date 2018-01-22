@@ -26,7 +26,6 @@ def upgrade():
     sa.Column('category', sa.String(length=80), nullable=True),
     sa.Column('flags', sa.Text(), nullable=True),
     sa.Column('hidden', sa.Boolean(), nullable=True),
-    sa.Column('first', sa.Boolean(), nullable=False),
     sa.PrimaryKeyConstraint('id')
     )
 

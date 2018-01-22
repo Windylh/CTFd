@@ -17,23 +17,73 @@ import sys
 import tempfile
 import time
 import dataset
+import datafreeze
 import zipfile
 import io
 
+from collections import namedtuple
 from email.mime.text import MIMEText
-from flask import current_app as app, request, redirect, url_for, session, render_template, abort
+from flask import current_app as app, request, redirect, url_for, session, render_template, abort, jsonify
 from flask_caching import Cache
 from flask_migrate import Migrate, upgrade as migrate_upgrade, stamp as migrate_stamp
 from itsdangerous import TimedSerializer, BadTimeSignature, Signer, BadSignature
 from six.moves.urllib.parse import urlparse, urljoin, quote, unquote
 from sqlalchemy.exc import InvalidRequestError, IntegrityError
+from socket import timeout
 from werkzeug.utils import secure_filename
 
-from CTFd.models import db, WrongKeys, Pages, Config, Tracking, Teams, Files, ip2long, long2ip
+from CTFd.models import db, Challenges, WrongKeys, Pages, Config, Tracking, Teams, Files, ip2long, long2ip
+
+from datafreeze.format import SERIALIZERS
+from datafreeze.format.fjson import JSONSerializer, JSONEncoder
+
+from distutils.version import StrictVersion
+
+if six.PY2:
+    text_type = unicode
+    binary_type = str
+else:
+    text_type = str
+    binary_type = bytes
 
 cache = Cache()
 migrate = Migrate()
 markdown = mistune.Markdown()
+plugin_scripts = []
+plugin_stylesheets = []
+
+
+class CTFdSerializer(JSONSerializer):
+    """
+    Slightly modified datafreeze serializer so that we can properly
+    export the CTFd database into a zip file.
+    """
+    def close(self):
+        for path, result in self.buckets.items():
+            result = self.wrap(result)
+
+            if self.fileobj is None:
+                fh = open(path, 'wb')
+            else:
+                fh = self.fileobj
+
+            data = json.dumps(result,
+                              cls=JSONEncoder,
+                              indent=self.export.get_int('indent'))
+
+            callback = self.export.get('callback')
+            if callback:
+                data = "%s && %s(%s);" % (callback, callback, data)
+
+            if six.PY3:
+                fh.write(bytes(data, encoding='utf-8'))
+            else:
+                fh.write(data)
+            if self.fileobj is None:
+                fh.close()
+
+
+SERIALIZERS['ctfd'] = CTFdSerializer  # Load the custom serializer
 
 
 def init_logs(app):
@@ -106,6 +156,8 @@ def init_utils(app):
     app.jinja_env.globals.update(ctf_name=ctf_name)
     app.jinja_env.globals.update(ctf_theme=ctf_theme)
     app.jinja_env.globals.update(get_configurable_plugins=get_configurable_plugins)
+    app.jinja_env.globals.update(get_registered_scripts=get_registered_scripts)
+    app.jinja_env.globals.update(get_registered_stylesheets=get_registered_stylesheets)
     app.jinja_env.globals.update(get_config=get_config)
     app.jinja_env.globals.update(hide_scores=hide_scores)
 
@@ -168,17 +220,30 @@ def ctf_theme():
 
 @cache.memoize()
 def hide_scores():
-    return get_config('hide_scores')
+    return get_config('hide_scores') or get_config('workshop_mode')
 
 
 def override_template(template, html):
-    with app.app_context():
-        app.jinja_loader.overriden_templates[template] = html
+    app.jinja_loader.overriden_templates[template] = html
 
 
+def register_plugin_script(url):
+    plugin_scripts.append(url)
+
+
+def register_plugin_stylesheet(url):
+    plugin_stylesheets.append(url)
+
+
+@cache.memoize()
 def pages():
-    pages = Pages.query.filter(Pages.route != "index").all()
-    return pages
+    db_pages = Pages.query.filter(Pages.route != "index", Pages.draft != True).all()
+    return db_pages
+
+
+@cache.memoize()
+def get_page(template):
+    return Pages.query.filter(Pages.route == template, Pages.draft != True).first()
 
 
 def authed():
@@ -223,8 +288,44 @@ def admins_only(f):
         if session.get('admin'):
             return f(*args, **kwargs)
         else:
-            return redirect(url_for('auth.login'))
+            return redirect(url_for('auth.login', next=request.path))
     return decorated_function
+
+
+def authed_only(f):
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        if session.get('id'):
+            return f(*args, **kwargs)
+        else:
+            return redirect(url_for('auth.login', next=request.path))
+    return decorated_function
+
+
+def ratelimit(method="POST", limit=50, interval=300, key_prefix="rl"):
+    def ratelimit_decorator(f):
+        @functools.wraps(f)
+        def decorated_function(*args, **kwargs):
+            ip_address = get_ip()
+            key = "{}:{}:{}".format(key_prefix, ip_address, request.endpoint)
+            current = cache.get(key)
+
+            if request.method == method:
+                if current and int(current) > limit - 1:  # -1 in order to align expected limit with the real value
+                    resp = jsonify({
+                        'code': 429,
+                        "message": "Too many requests. Limit is %s requests in %s seconds" % (limit, interval)
+                    })
+                    resp.status_code = 429
+                    return resp
+                else:
+                    if current is None:
+                        cache.set(key, 1, timeout=interval)
+                    else:
+                        cache.set(key, int(current) + 1, timeout=interval)
+            return f(*args, **kwargs)
+        return decorated_function
+    return ratelimit_decorator
 
 
 @cache.memoize()
@@ -278,6 +379,10 @@ def ctftime():
     return False
 
 
+def ctf_paused():
+    return get_config('paused')
+
+
 def ctf_started():
     return time.time() > int(get_config("start") or 0)
 
@@ -309,7 +414,7 @@ def unix_time_to_utc(t):
     return datetime.datetime.utcfromtimestamp(t)
 
 
-def get_ip():
+def get_ip(req=None):
     """ Returns the IP address of the currently in scope request. The approach is to define a list of trusted proxies
      (in this case the local network), and only trust the most recently defined untrusted IP address.
      Taken from http://stackoverflow.com/a/22936947/4285524 but the generator there makes no sense.
@@ -320,15 +425,17 @@ def get_ip():
      CTFd does not use IP address for anything besides cursory tracking of teams and it is ill-advised to do much
      more than that if you do not know what you're doing.
     """
+    if req is None:
+        req = request
     trusted_proxies = app.config['TRUSTED_PROXIES']
     combined = "(" + ")|(".join(trusted_proxies) + ")"
-    route = request.access_route + [request.remote_addr]
+    route = req.access_route + [req.remote_addr]
     for addr in reversed(route):
         if not re.match(combined, addr):  # IP is not trusted but we trust the proxies
             remote_addr = addr
             break
     else:
-        remote_addr = request.remote_addr
+        remote_addr = req.remote_addr
     return remote_addr
 
 
@@ -344,9 +451,39 @@ def get_themes():
 
 
 def get_configurable_plugins():
-    dir = os.path.join(app.root_path, 'plugins')
-    return [name for name in os.listdir(dir)
-            if os.path.isfile(os.path.join(dir, name, 'config.html'))]
+    Plugin = namedtuple('Plugin', ['name', 'route'])
+
+    plugins_path = os.path.join(app.root_path, 'plugins')
+    plugin_directories = os.listdir(plugins_path)
+
+    plugins = []
+
+    for dir in plugin_directories:
+        if os.path.isfile(os.path.join(plugins_path, dir, 'config.json')):
+            path = os.path.join(plugins_path, dir, 'config.json')
+            with open(path) as f:
+                plugin_json_data = json.loads(f.read())
+                p = Plugin(
+                    name=plugin_json_data.get('name'),
+                    route=plugin_json_data.get('route')
+                )
+                plugins.append(p)
+        elif os.path.isfile(os.path.join(plugins_path, dir, 'config.html')):
+            p = Plugin(
+                name=dir,
+                route='/admin/plugins/{}'.format(dir)
+            )
+            plugins.append(p)
+
+    return plugins
+
+
+def get_registered_scripts():
+    return plugin_scripts
+
+
+def get_registered_stylesheets():
+    return plugin_stylesheets
 
 
 def upload_file(file, chalid):
@@ -379,19 +516,13 @@ def delete_file(file_id):
 
 
 @cache.memoize()
+def get_app_config(key):
+    value = app.config.get(key)
+    return value
+
+
+@cache.memoize()
 def get_config(key):
-    with app.app_context():
-        value = app.config.get(key)
-        if value:
-            if value and value.isdigit():
-                return int(value)
-            elif value and isinstance(value, six.string_types):
-                if value.lower() == 'true':
-                    return True
-                elif value.lower() == 'false':
-                    return False
-                else:
-                    return value
     config = Config.query.filter_by(key=key).first()
     if config and config.value:
         value = config.value
@@ -422,30 +553,30 @@ def set_config(key, value):
 
 @cache.memoize()
 def can_send_mail():
-    return mailgun() or mailserver()
+    return mailserver() or mailgun()
 
 
 @cache.memoize()
 def mailgun():
     if app.config.get('MAILGUN_API_KEY') and app.config.get('MAILGUN_BASE_URL'):
         return True
-    if (get_config('mg_api_key') and get_config('mg_base_url')):
+    if get_config('mg_api_key') and get_config('mg_base_url'):
         return True
     return False
 
 
 @cache.memoize()
 def mailserver():
-    if (get_config('mail_server') and get_config('mail_port')):
+    if get_config('mail_server') and get_config('mail_port'):
         return True
     return False
 
 
 def get_smtp(host, port, username=None, password=None, TLS=None, SSL=None, auth=None):
     if SSL is None:
-        smtp = smtplib.SMTP(host, port)
+        smtp = smtplib.SMTP(host, port, timeout=3)
     else:
-        smtp = smtplib.SMTP_SSL(host, port)
+        smtp = smtplib.SMTP_SSL(host, port, timeout=3)
 
     if TLS:
         smtp.starttls()
@@ -459,20 +590,32 @@ def sendmail(addr, text):
     ctf_name = get_config('ctf_name')
     mailfrom_addr = get_config('mailfrom_addr') or app.config.get('MAILFROM_ADDR')
     if mailgun():
-        mg_api_key = get_config('mg_api_key') or app.config.get('MAILGUN_API_KEY')
-        mg_base_url = get_config('mg_base_url') or app.config.get('MAILGUN_BASE_URL')
-
-        r = requests.post(
-            mg_base_url + '/messages',
-            auth=("api", mg_api_key),
-            data={"from": "{} Admin <{}>".format(ctf_name, mailfrom_addr),
-                  "to": [addr],
-                  "subject": "Message from {0}".format(ctf_name),
-                  "text": text})
-        if r.status_code == 200:
-            return True
+        if get_config('mg_api_key') and get_config('mg_base_url'):
+            mg_api_key = get_config('mg_api_key')
+            mg_base_url = get_config('mg_base_url')
+        elif app.config.get('MAILGUN_API_KEY') and app.config.get('MAILGUN_BASE_URL'):
+            mg_api_key = app.config.get('MAILGUN_API_KEY')
+            mg_base_url = app.config.get('MAILGUN_BASE_URL')
         else:
-            return False
+            return False, "Mailgun settings are missing"
+
+        try:
+            r = requests.post(
+                mg_base_url + '/messages',
+                auth=("api", mg_api_key),
+                data={"from": "{} Admin <{}>".format(ctf_name, mailfrom_addr),
+                      "to": [addr],
+                      "subject": "Message from {0}".format(ctf_name),
+                      "text": text},
+                timeout=1.0
+            )
+        except requests.RequestException as e:
+            return False, "{error} exception occured while handling your request".format(error=type(e).__name__)
+
+        if r.status_code == 200:
+            return True, "Email sent"
+        else:
+            return False, "Mailgun settings are incorrect"
     elif mailserver():
         data = {
             'host': get_config('mail_server'),
@@ -489,17 +632,24 @@ def sendmail(addr, text):
         if get_config('mail_useauth'):
             data['auth'] = get_config('mail_useauth')
 
-        smtp = get_smtp(**data)
-        msg = MIMEText(text)
-        msg['Subject'] = "Message from {0}".format(ctf_name)
-        msg['From'] = mailfrom_addr
-        msg['To'] = addr
+        try:
+            smtp = get_smtp(**data)
+            msg = MIMEText(text)
+            msg['Subject'] = "Message from {0}".format(ctf_name)
+            msg['From'] = mailfrom_addr
+            msg['To'] = addr
 
-        smtp.sendmail(msg['From'], [msg['To']], msg.as_string())
-        smtp.quit()
-        return True
+            smtp.sendmail(msg['From'], [msg['To']], msg.as_string())
+            smtp.quit()
+            return True, "Email sent"
+        except smtplib.SMTPException as e:
+            return False, str(e)
+        except timeout:
+            return False, "SMTP server connection timed out"
+        except Exception as e:
+            return False, str(e)
     else:
-        return False
+        return False, "No mail settings configured"
 
 
 def verify_email(addr):
@@ -511,6 +661,18 @@ def verify_email(addr):
         token=base64encode(token, urlencode=True)
     )
     sendmail(addr, text)
+
+
+def forgot_password(email, team_name):
+    s = TimedSerializer(app.config['SECRET_KEY'])
+    token = s.dumps(team_name)
+    text = """Did you initiate a password reset? Click the following link to reset your password:
+
+{0}/{1}
+
+""".format(url_for('auth.reset_password', _external=True), base64encode(token, urlencode=True))
+
+    sendmail(email, text)
 
 
 def rmdir(dir):
@@ -527,6 +689,10 @@ def validate_url(url):
     return urlparse(url).scheme.startswith('http')
 
 
+def check_email_format(email):
+    return bool(re.match(r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)", email))
+
+
 def sha512(string):
     return hashlib.sha512(string).hexdigest()
 
@@ -540,7 +706,10 @@ def base64encode(s, urlencode=False):
 
     encoded = base64.urlsafe_b64encode(s)
     if six.PY3:
-        encoded = encoded.decode('utf-8')
+        try:
+            encoded = encoded.decode('utf-8')
+        except UnicodeDecodeError:
+            pass
     if urlencode:
         encoded = quote(encoded)
     return encoded
@@ -558,12 +727,49 @@ def base64decode(s, urldecode=False):
 
     decoded = base64.urlsafe_b64decode(s)
     if six.PY3:
-        decoded = decoded.decode('utf-8')
+        try:
+            decoded = decoded.decode('utf-8')
+        except UnicodeDecodeError:
+            pass
     return decoded
 
 
+def update_check(force=False):
+    update = app.config.get('UPDATE_CHECK') or force
+    if update:
+        next_update_check = get_config('next_update_check') or 0
+        if (next_update_check < time.time()) or force:
+            try:
+                params = {
+                    'current': app.VERSION
+                }
+                check = requests.get(
+                    'https://versioning.ctfd.io/versions/latest',
+                    params=params,
+                    timeout=0.1
+                ).json()
+            except requests.exceptions.RequestException as e:
+                pass
+            else:
+                try:
+                    latest = check['resource']['tag']
+                    html_url = check['resource']['html_url']
+                    if StrictVersion(latest) > StrictVersion(app.VERSION):
+                        set_config('version_latest', html_url)
+                    elif StrictVersion(latest) <= StrictVersion(app.VERSION):
+                        set_config('version_latest', None)
+                except KeyError:
+                    set_config('version_latest', None)
+            finally:
+                # 12 hours later
+                next_update_check_time = int(time.time() + 43200)
+                set_config('next_update_check', next_update_check_time)
+    else:
+        set_config('version_latest', None)
+
+
 def export_ctf(segments=None):
-    db = dataset.connect(get_config('SQLALCHEMY_DATABASE_URI'))
+    db = dataset.connect(get_app_config('SQLALCHEMY_DATABASE_URI'))
     if segments is None:
         segments = ['challenges', 'teams', 'both', 'metadata']
 
@@ -593,20 +799,29 @@ def export_ctf(segments=None):
     }
 
     # Backup database
-    backup = io.BytesIO()
+    backup = six.BytesIO()
+
     backup_zip = zipfile.ZipFile(backup, 'w')
 
     for segment in segments:
         group = groups[segment]
         for item in group:
             result = db[item].all()
-            result_file = io.BytesIO()
-            dataset.freeze(result, format='json', fileobj=result_file)
+            result_file = six.BytesIO()
+            datafreeze.freeze(result, format='ctfd', fileobj=result_file)
             result_file.seek(0)
             backup_zip.writestr('db/{}.json'.format(item), result_file.read())
 
+    # Guarantee that alembic_version is saved into the export
+    if 'metadata' not in segments:
+        result = db['alembic_version'].all()
+        result_file = six.BytesIO()
+        datafreeze.freeze(result, format='ctfd', fileobj=result_file)
+        result_file.seek(0)
+        backup_zip.writestr('db/alembic_version.json', result_file.read())
+
     # Backup uploads
-    upload_folder = os.path.join(os.path.normpath(app.root_path), get_config('UPLOAD_FOLDER'))
+    upload_folder = os.path.join(os.path.normpath(app.root_path), app.config.get('UPLOAD_FOLDER'))
     for root, dirs, files in os.walk(upload_folder):
         for file in files:
             parent_dir = os.path.basename(root)
@@ -618,7 +833,7 @@ def export_ctf(segments=None):
 
 
 def import_ctf(backup, segments=None, erase=False):
-    side_db = dataset.connect(get_config('SQLALCHEMY_DATABASE_URI'))
+    side_db = dataset.connect(get_app_config('SQLALCHEMY_DATABASE_URI'))
     if segments is None:
         segments = ['challenges', 'teams', 'both', 'metadata']
 
@@ -675,15 +890,22 @@ def import_ctf(backup, segments=None, erase=False):
                 elif item == 'pages':
                     saved = json.loads(data)
                     for entry in saved['results']:
+                        # Support migration c12d2a1b0926_add_draft_and_title_to_pages
                         route = entry['route']
+                        title = entry.get('title', route.title())
                         html = entry['html']
+                        draft = entry.get('draft', False)
+                        auth_required = entry.get('auth_required', False)
                         page = Pages.query.filter_by(route=route).first()
                         if page:
                             page.html = html
                         else:
-                            page = Pages(route, html)
+                            page = Pages(title, route, html, draft=draft, auth_required=auth_required)
                             db.session.add(page)
                         db.session.commit()
+
+    teams_base = db.session.query(db.func.max(Teams.id)).scalar() or 0
+    chals_base = db.session.query(db.func.max(Challenges.id)).scalar() or 0
 
     for segment in segments:
         group = groups[segment]
@@ -697,14 +919,34 @@ def import_ctf(backup, segments=None, erase=False):
                     entry_id = entry.pop('id', None)
                     # This is a hack to get SQlite to properly accept datetime values from dataset
                     # See Issue #246
-                    if get_config('SQLALCHEMY_DATABASE_URI').startswith('sqlite'):
+                    if get_app_config('SQLALCHEMY_DATABASE_URI').startswith('sqlite'):
                         for k, v in entry.items():
                             if isinstance(v, six.string_types):
-                                try:
+                                match = re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d", v)
+                                if match:
+                                    entry[k] = datetime.datetime.strptime(v, '%Y-%m-%dT%H:%M:%S.%f')
+                                    continue
+                                match = re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", v)
+                                if match:
                                     entry[k] = datetime.datetime.strptime(v, '%Y-%m-%dT%H:%M:%S')
-                                except ValueError as e:
-                                    pass
-                    table.insert(entry)
+                                    continue
+                    for k, v in entry.items():
+                        if k == 'chal' or k == 'chalid':
+                            entry[k] += chals_base
+                        if k == 'team' or k == 'teamid':
+                            entry[k] += teams_base
+
+                    if item == 'teams':
+                        table.insert_ignore(entry, ['email'])
+                    elif item == 'keys':
+                        # Support migration 2539d8b5082e_rename_key_type_to_type
+                        key_type = entry.get('key_type', None)
+                        if key_type is not None:
+                            entry['type'] = key_type
+                            del entry['key_type']
+                        table.insert(entry)
+                    else:
+                        table.insert(entry)
             else:
                 continue
 
@@ -726,6 +968,6 @@ def import_ctf(backup, segments=None, erase=False):
             os.makedirs(dirname)
 
         source = backup.open(f)
-        target = file(full_path, "wb")
+        target = open(full_path, "wb")
         with source, target:
             shutil.copyfileobj(source, target)
