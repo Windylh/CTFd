@@ -67,6 +67,16 @@
 						<label for="password">Password</label>
 						<input type="password" class="form-control" name="password" id="password"/>
 					</div>
+                    <div class="form-group">
+						<label for="major">Major</label>
+						<input type="text" class="form-control" name="major" id="major"
+							   placeholder="Enter Major" required>
+					</div>
+                    <div class="form-group">
+						<label for="phone">Phone Number</label>
+						<input type="text" class="form-control" name="phone" id="phone"
+							   placeholder="Enter Phone Number" required>
+					</div>
 					<div class="form-group">
 						<label for="website">Website</label>
 						<input type="text" class="form-control" name="website" id="website"
@@ -131,14 +141,20 @@
 						</td>
 						<td class="text-center"><b>Team</b>
 						</td>
+                        </td>
+						<td class="text-center"><b>Major</b>
+						</td>
 						<td class="d-none d-md-table-cell d-lg-table-cell text-center"><b>Email</b>
 						</td>
+                        <!--
 						<td class="d-none d-md-table-cell d-lg-table-cell text-center"><b>Website</b>
 						</td>
 						<td class="d-none d-md-table-cell d-lg-table-cell text-center"><b>Affiliation</b>
 						</td>
 						<td class="d-none d-md-table-cell d-lg-table-cell text-center"><b>Country</b>
 						</td>
+						-->
+                        <td class="text-center"><b>Phone Number</b>
 						<td class="text-center"><b>Admin</b>
 						</td>
 						<td class="text-center"><b>Verified</b>
@@ -153,8 +169,11 @@
 						<td class="team-id" value="{{ team.id }}">{{ team.id }}</td>
 						<td class="team-name" value="{{ team.name }}"><a href="{{ request.script_root }}/admin/team/{{ team.id }}">{{ team.name | truncate(32) }}</a>
 						</td>
+                        <td class="team-major" value="{{ team.major }}">{{ team.major }}</td>
 						<td class="team-email d-none d-md-table-cell d-lg-table-cell" value="{{ team.email }}">{{ team.email | truncate(32) }}</td>
-						<td class="team-website d-none d-md-table-cell d-lg-table-cell text-center">
+						<td class="team-phone" value="{{ team.phone }}">{{ team.phone }}</td>
+                        <!--
+                        <td class="team-website d-none d-md-table-cell d-lg-table-cell text-center">
 							{% if team.website %}
 								<a href="{{ team.website }}" target="_blank">
 									<i class="btn-fa fas fa-external-link-alt" data-toggle="tooltip" data-placement="top"
@@ -168,6 +187,7 @@
 						<td class="team-country d-none d-md-table-cell d-lg-table-cell" value="{{ team.country if team.country is not none }}">
 							<span>{% if team.country %}{{ team.country }}{% endif %}</span>
 						</td>
+						-->
 						<td class="team-admin">
 							<div class="center-block checkbox text-center">
 								<input type="checkbox" {% if team.admin %}checked{% endif %}>

@@ -22,7 +22,7 @@
 			<form method="post" accept-charset="utf-8" autocomplete="off" role="form" class="form-horizontal">
 				<div class="form-group">
 					<label for="name-input">
-						Team Name
+						Name
 					</label>
 					<input class="form-control" type="text" name="name" id="name-input" {% if name %}value="{{ name }}"{% endif %} />
 				</div>
@@ -34,9 +34,21 @@
 				</div>
 				<div class="form-group">
 					<label for="password-input">
-						Password
+						Passoword
 					</label>
 					<input class="form-control" type="password" name="password" id="password-input" {% if password %}value="{{ password }}"{% endif %}/>
+				</div>
+                <div class="form-group">
+					<label for="major-input">
+						Major(format：信息安全2017-1)
+					</label>
+					<input class="form-control" type="text" name="major" id="major-input" {% if major %}value="{{ major }}"{% endif %}/>
+				</div>
+                <div class="form-group">
+					<label for="phone-input">
+						Phone Number
+					</label>
+					<input class="form-control" type="text" name="phone" id="phone-input" {% if phone %}value="{{ phone }}"{% endif %}/>
 				</div>
 				<div class="row pt-3">
 					<div class="col-md-12">

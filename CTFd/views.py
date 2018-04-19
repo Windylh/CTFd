@@ -32,7 +32,7 @@ def setup():
             name = request.form['name']
             email = request.form['email']
             password = request.form['password']
-            admin = Teams(name, email, password)
+            admin = Teams(name, email, password, '', '')
             admin.admin = True
             admin.banned = True
 
@@ -40,18 +40,11 @@ def setup():
 
             index = """<div class="row">
     <div class="col-md-6 offset-md-3">
-        <img class="w-100 mx-auto d-block" style="max-width: 500px;padding: 50px;padding-top: 14vh;" src="themes/core/static/img/logo.png" />
+        <img class="w-100 mx-auto d-block" style="max-width: 500px;padding: 50px;padding-top: 14vh;" src="themes/core/static/img/logo.jpg" />
         <h3 class="text-center">
-            <p>A cool CTF platform from <a href="https://ctfd.io">ctfd.io</a></p>
-            <p>Follow us on social media:</p>
-            <a href="https://twitter.com/ctfdio"><i class="fab fa-twitter fa-2x" aria-hidden="true"></i></a>&nbsp;
-            <a href="https://facebook.com/ctfdio"><i class="fab fa-facebook fa-2x" aria-hidden="true"></i></a>&nbsp;
-            <a href="https://github.com/ctfd"><i class="fab fa-github fa-2x" aria-hidden="true"></i></a>
+            一个正经的CTF平台
         </h3>
         <br>
-        <h4 class="text-center">
-            <a href="admin">Click here</a> to login and setup your CTF
-        </h4>
     </div>
 </div>""".format(request.script_root)
 
@@ -223,39 +216,48 @@ def profile():
 
             name = request.form.get('name').strip()
             email = request.form.get('email').strip()
+            major = request.form.get('major').strip()
+            phone = request.form.get('phone').strip()
+            '''
             website = request.form.get('website').strip()
             affiliation = request.form.get('affiliation').strip()
             country = request.form.get('country').strip()
+            '''
 
             user = Teams.query.filter_by(id=session['id']).first()
-
             if not utils.get_config('prevent_name_change'):
                 names = Teams.query.filter_by(name=name).first()
                 name_len = len(request.form['name']) == 0
 
             emails = Teams.query.filter_by(email=email).first()
-            valid_email = utils.check_email_format(email)
+            phones = Teams.query.filter_by(phone=phone).first()
+            #valid_email = utils.check_email_format(email)
 
-            if utils.check_email_format(name) is True:
-                errors.append('Team name cannot be an email address')
+            #if utils.check_email_format(name) is True:
+            #    errors.append('Team name cannot be an email address')
 
             if ('password' in request.form.keys() and not len(request.form['password']) == 0) and \
                     (not bcrypt_sha256.verify(request.form.get('confirm').strip(), user.password)):
                 errors.append("Your old password doesn't match what we have.")
+            '''  
             if not valid_email:
                 errors.append("That email doesn't look right")
+            '''
             if not utils.get_config('prevent_name_change') and names and name != session['username']:
                 errors.append('That team name is already taken')
             if emails and emails.id != session['id']:
                 errors.append('That email has already been used')
             if not utils.get_config('prevent_name_change') and name_len:
                 errors.append('Pick a longer team name')
+            '''
             if website.strip() and not utils.validate_url(website):
                 errors.append("That doesn't look like a valid URL")
-
+            '''
+            if phones:
+                errors.append('That phone number is already taken')
             if len(errors) > 0:
-                return render_template('profile.html', name=name, email=email, website=website,
-                                       affiliation=affiliation, country=country, errors=errors)
+                return render_template('profile.html', name=name, email=email, website='', major=major, phone=phone
+                                       ,affiliation='', country='', errors=errors)
             else:
                 team = Teams.query.filter_by(id=session['id']).first()
                 if team.name != name:
@@ -269,9 +271,11 @@ def profile():
 
                 if 'password' in request.form.keys() and not len(request.form['password']) == 0:
                     team.password = bcrypt_sha256.encrypt(request.form.get('password'))
-                team.website = website
-                team.affiliation = affiliation
-                team.country = country
+                team.major = major
+                team.phone = phone
+                #team.website = website
+                #team.affiliation = affiliation
+                #team.country = country
                 db.session.commit()
                 db.session.close()
                 return redirect(url_for('views.profile'))
@@ -279,12 +283,14 @@ def profile():
             user = Teams.query.filter_by(id=session['id']).first()
             name = user.name
             email = user.email
+            major = user.major
+            phone = user.phone
             website = user.website
             affiliation = user.affiliation
             country = user.country
             prevent_name_change = utils.get_config('prevent_name_change')
             confirm_email = utils.get_config('verify_emails') and not user.verified
-            return render_template('profile.html', name=name, email=email, website=website, affiliation=affiliation,
+            return render_template('profile.html', name=name, email=email, major=major,website=website, affiliation=affiliation, phone=phone,
                                    country=country, prevent_name_change=prevent_name_change, confirm_email=confirm_email)
     else:
         return redirect(url_for('auth.login'))

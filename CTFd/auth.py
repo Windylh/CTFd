@@ -144,10 +144,13 @@ def register():
         name = request.form['name']
         email = request.form['email']
         password = request.form['password']
+        major = request.form['major']
+        phone = request.form['phone']
 
         name_len = len(name) == 0
         names = Teams.query.add_columns('name', 'id').filter_by(name=name).first()
         emails = Teams.query.add_columns('email', 'id').filter_by(email=email).first()
+        phones = Teams.query.add_columns('phone', 'id').filter_by(phone=phone).first()
         pass_short = len(password) == 0
         pass_long = len(password) > 128
         valid_email = utils.check_email_format(request.form['email'])
@@ -167,12 +170,14 @@ def register():
             errors.append('Pick a shorter password')
         if name_len:
             errors.append('Pick a longer team name')
+        if phones:
+            errors.append("That phone number is already taken")
 
         if len(errors) > 0:
-            return render_template('register.html', errors=errors, name=request.form['name'], email=request.form['email'], password=request.form['password'])
+            return render_template('register.html', errors=errors, name=request.form['name'], email=request.form['email'], password=request.form['password'],major=request.form['major'], phone=request.form['phone'])
         else:
             with app.app_context():
-                team = Teams(name, email.lower(), password)
+                team = Teams(name, email.lower(), password, major, phone)
                 db.session.add(team)
                 db.session.commit()
                 db.session.flush()

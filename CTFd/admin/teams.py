@@ -53,6 +53,8 @@ def admin_create_team():
     name = request.form.get('name', None)
     password = request.form.get('password', None)
     email = request.form.get('email', None)
+    major = request.form.get('major', None)
+    phone = request.form.get('phone', None)
     website = request.form.get('website', None)
     affiliation = request.form.get('affiliation', None)
     country = request.form.get('country', None)
@@ -87,7 +89,7 @@ def admin_create_team():
         db.session.close()
         return jsonify({'data': errors})
 
-    team = Teams(name, email, password)
+    team = Teams(name, email, password, major,phone)
     team.website = website
     team.affiliation = affiliation
     team.country = country
@@ -140,6 +142,8 @@ def admin_team(teamid):
         name = request.form.get('name', None)
         password = request.form.get('password', None)
         email = request.form.get('email', None)
+        major = request.form.get('major', None)
+        phone = request.form.get('phone', None)
         website = request.form.get('website', None)
         affiliation = request.form.get('affiliation', None)
         country = request.form.get('country', None)
@@ -174,6 +178,8 @@ def admin_team(teamid):
                 user.email = email
             if password:
                 user.password = bcrypt_sha256.encrypt(password)
+            user.major = major
+            user.phone = phone
             user.website = website
             user.affiliation = affiliation
             user.country = country

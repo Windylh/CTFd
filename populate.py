@@ -244,7 +244,7 @@ if __name__ == '__main__':
             name = gen_name()
             if name not in used:
                 used.append(name)
-                team = Teams(name, name.lower() + gen_email(), 'password')
+                team = Teams(name, name.lower() + gen_email(), 'password', '', '')
                 team.verified = True
                 db.session.add(team)
                 count += 1
