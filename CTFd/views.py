@@ -253,7 +253,7 @@ def profile():
             if website.strip() and not utils.validate_url(website):
                 errors.append("That doesn't look like a valid URL")
             '''
-            if phones:
+            if phones and phones.id != session['id']:
                 errors.append('That phone number is already taken')
             if len(errors) > 0:
                 return render_template('profile.html', name=name, email=email, website='', major=major, phone=phone
